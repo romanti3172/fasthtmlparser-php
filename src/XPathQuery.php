@@ -229,20 +229,27 @@ final class XPathQuery implements \Stringable
 
     private static function matchesTag(array $test, HtmlNode $n): bool
     {
+        return self::matchesTagAt($test, $n->doc, $n->index);
+    }
+
+    /** The node test on the tag at index $i, read from the arrays of the document. */
+    private static function matchesTagAt(array $test, HtmlDocument $d, int $i): bool
+    {
         switch ($test['k']) {
             case self::TK_NAME:
-                return $test['q']->matches($n);
+                return $test['q']->nameMatchesAt($d, $i);
             case self::TK_PREFIX:
-                $name = $n->name();
+                $k = $d->keys[$i];
+                $name = $k >= 0 ? TagNames::NAMES[$k] : $d->customs[$i];
                 $len = strlen($test['name']);
-                return CssQuery::isElement($n) && strlen($name) >= $len && Chars::equalFold(substr($name, 0, $len), $test['name']);
+                return CssQuery::isElementAt($d, $i) && strlen($name) >= $len && Chars::equalFold(substr($name, 0, $len), $test['name']);
             case self::TK_WILDCARD:
             case self::TK_CONTAINER:
-                return CssQuery::isElement($n);
+                return CssQuery::isElementAt($d, $i);
             case self::TK_NODE:
-                return CssQuery::isElement($n) || $n->key === Parser::COMMENT;
+                return CssQuery::isElementAt($d, $i) || $d->keys[$i] === Parser::COMMENT;
             case self::TK_COMMENT:
-                return $n->key === Parser::COMMENT;
+                return $d->keys[$i] === Parser::COMMENT;
             default:
                 return false;
         }
@@ -319,27 +326,28 @@ final class XPathQuery implements \Stringable
             return;
         }
         $doc = $x->doc;
-        $nodes = $doc->nodes;
-        $count = count($nodes);
+        $ends = $doc->ends;
+        $depths = $doc->depths;
+        $starts = $doc->starts;
         $parent = $x->kind === XNode::ELEMENT ? $x->tag : null;
-        for ($i = $first; $i < $count; $i++) {
-            $t = $nodes[$i];
-            if ($t->end > $end) {
+        for ($i = $first, $count = $doc->size; $i < $count; $i++) {
+            if ($ends[$i] > $end) {
                 break;
             }
-            if ($t->depth !== $childDepth) {
+            if ($depths[$i] !== $childDepth) {
                 continue;
             }
-            if ($wantText && $t->start > $p) {
-                $e = min($t->start, $textEnd);
+            $start = $starts[$i];
+            if ($wantText && $start > $p) {
+                $e = min($start, $textEnd);
                 if ($e > $p) {
                     $out[] = new XNode(XNode::TEXT, $doc, $parent, $p, $e - $p);
                 }
             }
-            if ($wantTags && self::matchesTag($test, $t)) {
-                $out[] = XNode::ofTag($t);
+            if ($wantTags && self::matchesTagAt($test, $doc, $i)) {
+                $out[] = XNode::ofTag($doc->at($i));
             }
-            $p = $t->end + 1;
+            $p = $ends[$i] + 1;
         }
         if ($wantText && $textEnd > $p) {
             $out[] = new XNode(XNode::TEXT, $doc, $parent, $p, $textEnd - $p);
@@ -366,28 +374,27 @@ final class XPathQuery implements \Stringable
             return;
         }
         // tags only: one linear scan of the flat list
-        $nodes = $x->doc->nodes;
-        $count = count($nodes);
+        $d = $x->doc;
+        $ends = $d->ends;
+        $count = $d->size;
         if ($test['k'] === self::TK_NAME) {
             $q = $test['q'];
             for ($i = $first; $i < $count; $i++) {
-                $t = $nodes[$i];
-                if ($t->end > $end) {
+                if ($ends[$i] > $end) {
                     break;
                 }
-                if ($q->matches($t)) {
-                    $out[] = XNode::ofTag($t);
+                if ($q->nameMatchesAt($d, $i)) {
+                    $out[] = XNode::ofTag($d->at($i));
                 }
             }
             return;
         }
         for ($i = $first; $i < $count; $i++) {
-            $t = $nodes[$i];
-            if ($t->end > $end) {
+            if ($ends[$i] > $end) {
                 break;
             }
-            if (self::matchesTag($test, $t)) {
-                $out[] = XNode::ofTag($t);
+            if (self::matchesTagAt($test, $d, $i)) {
+                $out[] = XNode::ofTag($d->at($i));
             }
         }
     }
@@ -416,7 +423,7 @@ final class XPathQuery implements \Stringable
                 return $x->tag !== null ? XNode::ofTag($x->tag) : XNode::root($x->doc);
             default:
                 $t = $x->tag;
-                return $t->depth > 0 && $t->parentIndex >= 0 ? XNode::ofTag($x->doc->nodes[$t->parentIndex]) : XNode::root($x->doc);
+                return $t->depth > 0 && $t->parentIndex >= 0 ? XNode::ofTag($x->doc->at($t->parentIndex)) : XNode::root($x->doc);
         }
     }
 
@@ -855,8 +862,8 @@ final class XPathQuery implements \Stringable
      */
     private static function selectDescendantsOfNested(array $step, array $input): array
     {
-        $nodes = self::$doc->nodes;
-        $count = count($nodes);
+        $ends = self::$doc->ends;
+        $count = self::$doc->size;
         $out = [];
         $scannedTo = -1; // the tags before this index were scanned for an earlier input node
         foreach ($input as $x) {
@@ -869,7 +876,7 @@ final class XPathQuery implements \Stringable
                 // where addDescendants stops for this tag
                 if ($x->kind === XNode::ELEMENT && $t->innerStart > 0 && $t->innerEnd > 0) {
                     $k = $t->index + 1;
-                    while ($k < $count && $nodes[$k]->end <= $t->end) {
+                    while ($k < $count && $ends[$k] <= $t->end) {
                         $k++;
                     }
                     $scannedTo = max($scannedTo, $k);
@@ -1022,16 +1029,16 @@ final class XPathQuery implements \Stringable
         if (!self::matchesText($test) && $x->kind !== XNode::TEXT) {
             // tags only: walk the flat list; deeper tags are inside the siblings, a shallower one ends the parent
             $t = $x->tag;
-            $nodes = $t->doc->nodes;
-            $count = count($nodes);
+            $d = $t->doc;
+            $depths = $d->depths;
+            $count = $d->size;
             $stepBy = $following ? 1 : -1;
             for ($i = $t->index + $stepBy; $i >= 0 && $i < $count; $i += $stepBy) {
-                $item = $nodes[$i];
-                if ($item->depth < $t->depth) {
+                if ($depths[$i] < $t->depth) {
                     break;
                 }
-                if ($item->depth === $t->depth && self::matchesTag($test, $item)) {
-                    $out[] = XNode::ofTag($item);
+                if ($depths[$i] === $t->depth && self::matchesTagAt($test, $d, $i)) {
+                    $out[] = XNode::ofTag($d->at($i));
                 }
             }
             return;
@@ -1081,12 +1088,12 @@ final class XPathQuery implements \Stringable
             }
             return;
         }
-        $nodes = self::$doc->nodes;
-        $count = count($nodes);
+        $d = self::$doc;
+        $starts = $d->starts;
         $first = $x->kind === XNode::ELEMENT || $x->kind === XNode::COMMENT ? $x->tag->index + 1 : 0;
-        for ($i = $first; $i < $count; $i++) {
-            if ($nodes[$i]->start > $after && self::matchesTag($test, $nodes[$i])) {
-                $out[] = XNode::ofTag($nodes[$i]);
+        for ($i = $first, $count = $d->size; $i < $count; $i++) {
+            if ($starts[$i] > $after && self::matchesTagAt($test, $d, $i)) {
+                $out[] = XNode::ofTag($d->at($i));
             }
         }
     }
@@ -1106,11 +1113,12 @@ final class XPathQuery implements \Stringable
             }
             return;
         }
-        $nodes = self::$doc->nodes;
-        $last = $x->kind === XNode::ELEMENT || $x->kind === XNode::COMMENT ? $x->tag->index - 1 : count($nodes) - 1;
+        $d = self::$doc;
+        $ends = $d->ends;
+        $last = $x->kind === XNode::ELEMENT || $x->kind === XNode::COMMENT ? $x->tag->index - 1 : $d->size - 1;
         for ($i = $last; $i >= 0; $i--) {
-            if ($nodes[$i]->end < $before && self::matchesTag($test, $nodes[$i])) {
-                $out[] = XNode::ofTag($nodes[$i]);
+            if ($ends[$i] < $before && self::matchesTagAt($test, $d, $i)) {
+                $out[] = XNode::ofTag($d->at($i));
             }
         }
     }

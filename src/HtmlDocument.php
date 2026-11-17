@@ -24,11 +24,56 @@ final class HtmlDocument implements \IteratorAggregate, \Countable
     public readonly string $source;
     /** @internal */
     public readonly string $url;
+
+    // The tags as parallel arrays, by index in document order. Tag objects are made when they are asked for.
     /**
-     * @internal
-     * @var list<HtmlNode>
+     * @internal Tag key, or -1 for a name that is not in Tag
+     * @var list<int>
      */
-    public readonly array $nodes;
+    public readonly array $keys;
+    /**
+     * @internal the lower-case name of a tag that is not in Tag, "" for the others
+     * @var list<string>
+     */
+    public readonly array $customs;
+    /**
+     * @internal the index of the enclosing tag, -1 at the top level
+     * @var list<int>
+     */
+    public readonly array $parents;
+    /**
+     * @internal the nesting depth, 0 at the top level
+     * @var list<int>
+     */
+    public readonly array $depths;
+    /**
+     * @internal the opening '<'
+     * @var list<int>
+     */
+    public readonly array $starts;
+    /**
+     * @internal the last '>': of the end tag when there is one, otherwise of the opening tag
+     * @var list<int>
+     */
+    public readonly array $ends;
+    /**
+     * @internal right after the opening tag; 0 when the tag is not closed
+     * @var list<int>
+     */
+    public readonly array $innerStarts;
+    /**
+     * @internal the last byte before the end tag; 0 when the tag is not closed
+     * @var list<int>
+     */
+    public readonly array $innerEnds;
+    /** @internal the number of tags */
+    public readonly int $size;
+
+    /**
+     * @internal the tag objects made so far
+     * @var array<int, HtmlNode>
+     */
+    public array $made = [];
     /** @internal sibling links and positions, built by the first selector that needs them */
     public ?CssTree $cssTree = null;
     private ?Url $base = null;
@@ -38,7 +83,9 @@ final class HtmlDocument implements \IteratorAggregate, \Countable
     {
         $this->source = $source;
         $this->url = $url;
-        $this->nodes = Parser::parseTags($this, $source);
+        [$this->keys, $this->customs, $this->parents, $this->depths, $this->starts, $this->ends, $this->innerStarts,
+            $this->innerEnds] = Parser::parseTags($source);
+        $this->size = count($this->keys);
     }
 
     /**
@@ -82,30 +129,45 @@ final class HtmlDocument implements \IteratorAggregate, \Countable
      */
     public function nodes(): array
     {
-        return $this->nodes;
+        $out = [];
+        for ($i = 0; $i < $this->size; $i++) {
+            $out[] = $this->made[$i] ??= new HtmlNode($this, $i);
+        }
+        return $out;
     }
 
     /** The number of tags (comments included). */
     public function size(): int
     {
-        return count($this->nodes);
+        return $this->size;
     }
 
     public function count(): int
     {
-        return count($this->nodes);
+        return $this->size;
     }
 
     /** The tag at index $i in document order, or null when there is none. */
     public function node(int $i): ?HtmlNode
     {
-        return $this->nodes[$i] ?? null;
+        if ($i < 0 || $i >= $this->size) {
+            return null;
+        }
+        return $this->made[$i] ??= new HtmlNode($this, $i);
     }
 
-    /** @return \ArrayIterator<int, HtmlNode> */
-    public function getIterator(): \ArrayIterator
+    /** @internal the tag at an index that exists */
+    public function at(int $i): HtmlNode
     {
-        return new \ArrayIterator($this->nodes);
+        return $this->made[$i] ??= new HtmlNode($this, $i);
+    }
+
+    /** @return \Generator<int, HtmlNode> */
+    public function getIterator(): \Generator
+    {
+        for ($i = 0; $i < $this->size; $i++) {
+            yield $i => $this->made[$i] ??= new HtmlNode($this, $i);
+        }
     }
 
     // ----- search -----
@@ -113,7 +175,7 @@ final class HtmlDocument implements \IteratorAggregate, \Countable
     /** The first tag in the document that matches the query, or null. */
     public function find(Query $q): ?HtmlNode
     {
-        return self::findIn($this->nodes, 0, PHP_INT_MAX, $q);
+        return $q->findIn($this, 0, PHP_INT_MAX);
     }
 
     /**
@@ -123,7 +185,7 @@ final class HtmlDocument implements \IteratorAggregate, \Countable
      */
     public function findAll(Query $q): array
     {
-        return self::findAllIn($this->nodes, 0, PHP_INT_MAX, $q);
+        return $q->findAllIn($this, 0, PHP_INT_MAX);
     }
 
     /**
@@ -174,46 +236,6 @@ final class HtmlDocument implements \IteratorAggregate, \Countable
     public function xpathValue(string $expression): string
     {
         return XPathQuery::cached($expression)->value($this) ?? '';
-    }
-
-    /**
-     * @internal
-     * @param list<HtmlNode> $nodes
-     */
-    public static function findIn(array $nodes, int $first, int $end, Query $q): ?HtmlNode
-    {
-        $count = count($nodes);
-        for ($i = $first; $i < $count; $i++) {
-            $n = $nodes[$i];
-            if ($n->end > $end) {
-                break;
-            }
-            if ($q->matches($n)) {
-                return $n;
-            }
-        }
-        return null;
-    }
-
-    /**
-     * @internal
-     * @param list<HtmlNode> $nodes
-     * @return list<HtmlNode>
-     */
-    public static function findAllIn(array $nodes, int $first, int $end, Query $q): array
-    {
-        $out = [];
-        $count = count($nodes);
-        for ($i = $first; $i < $count; $i++) {
-            $n = $nodes[$i];
-            if ($n->end > $end) {
-                break;
-            }
-            if ($q->matches($n)) {
-                $out[] = $n;
-            }
-        }
-        return $out;
     }
 
     // <shortcuts document>

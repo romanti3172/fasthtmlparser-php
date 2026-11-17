@@ -134,19 +134,76 @@ final class Query
     /** Whether the tag matches every criterion; false for null. */
     public function matches(?HtmlNode $n): bool
     {
-        if ($n === null) {
-            return false;
-        }
-        if ($this->key >= 0) {
-            if ($n->key !== $this->key && ($n->key >= 0 || $this->tagName === '' || !Chars::equalFold($n->custom, $this->tagName))) {
-                return false;
+        return $n !== null && $this->nameMatchesAt($n->doc, $n->index) && ($this->plain || $this->matchesMore($n));
+    }
+
+    /** @internal The first tag from index $from on that matches, up to the tags that end after $end; or null. */
+    public function findIn(HtmlDocument $d, int $from, int $end): ?HtmlNode
+    {
+        $r = $this->scan($d, $from, $end, true);
+        return $r[0] ?? null;
+    }
+
+    /**
+     * @internal All tags from index $from on that match, up to the tags that end after $end.
+     *
+     * @return list<HtmlNode>
+     */
+    public function findAllIn(HtmlDocument $d, int $from, int $end): array
+    {
+        return $this->scan($d, $from, $end, false);
+    }
+
+    /** @return list<HtmlNode> */
+    private function scan(HtmlDocument $d, int $from, int $end, bool $firstOnly): array
+    {
+        $out = [];
+        $ends = $d->ends;
+        $keys = $d->keys;
+        $key = $this->key;
+        $plain = $this->plain;
+        $count = $d->size;
+        for ($i = $from; $i < $count; $i++) {
+            if ($ends[$i] > $end) {
+                break;
             }
-        } elseif ($this->tagName !== '' && !Chars::equalFold($n->name(), $this->tagName)) {
-            return false;
+            // the name on the arrays first (a known name: one int compare), the tag object only for a candidate
+            if ($key >= 0) {
+                $k = $keys[$i];
+                if ($k !== $key && ($k >= 0 || $this->tagName === '' || !Chars::equalFold($d->customs[$i], $this->tagName))) {
+                    continue;
+                }
+            } elseif ($this->tagName !== '' && !$this->nameMatchesAt($d, $i)) {
+                continue;
+            }
+            $n = $d->made[$i] ??= new HtmlNode($d, $i);
+            if ($plain || $this->matchesMore($n)) {
+                $out[] = $n;
+                if ($firstOnly) {
+                    break;
+                }
+            }
         }
-        if ($this->plain) {
+        return $out;
+    }
+
+    /** @internal Whether the tag at index $i has the name of the query. */
+    public function nameMatchesAt(HtmlDocument $d, int $i): bool
+    {
+        if ($this->key >= 0) {
+            $k = $d->keys[$i];
+            return $k === $this->key || ($k < 0 && $this->tagName !== '' && Chars::equalFold($d->customs[$i], $this->tagName));
+        }
+        if ($this->tagName === '') {
             return true;
         }
+        $k = $d->keys[$i];
+        return Chars::equalFold($k >= 0 ? TagNames::NAMES[$k] : $d->customs[$i], $this->tagName);
+    }
+
+    /** The criteria other than the name. */
+    private function matchesMore(HtmlNode $n): bool
+    {
         if ($this->id !== null && ($this->id === '' || !Attrs::attrEquals(Attrs::attrRaw($n, 'id'), $this->id))) {
             return false;
         }

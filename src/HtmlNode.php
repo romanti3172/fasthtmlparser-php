@@ -10,29 +10,44 @@ namespace Z3l\FastHtmlParser;
  */
 final class HtmlNode implements \Stringable
 {
-    /**
-     * @internal The properties are the parser's: read them through the methods.
-     *
-     * @param int $parentIndex index of the enclosing tag, -1 at the top level
-     * @param int $key Tag key, or -1 for a name that is not in Tag
-     * @param string $custom lower-case name for tags that are not in Tag, "" for known tags
-     * @param int $innerStart right after the opening tag; 0 when the tag is not closed
-     */
-    public function __construct(
-        public readonly HtmlDocument $doc,
-        public readonly int $index,
-        public readonly int $parentIndex,
-        public readonly int $key,
-        public readonly string $custom,
-        public readonly int $start,
-        public int $end,
-        public int $innerStart,
-        public readonly int $depth,
-    ) {
-    }
+    // The tag as the parser left it, copied from the arrays of the document. Read them through the methods:
+    // the properties are public (and untyped) only because PHP reads such properties fastest.
 
-    /** @internal the last char before the end tag; 0 when the tag is not closed */
-    public int $innerEnd = 0;
+    /** @internal @var HtmlDocument */
+    public $doc;
+    /** @internal @var int */
+    public $index;
+    /** @internal @var int the index of the enclosing tag, -1 at the top level */
+    public $parentIndex;
+    /** @internal @var int Tag key, or -1 for a name that is not in Tag */
+    public $key;
+    /** @internal @var string the lower-case name of a tag that is not in Tag, "" for the others */
+    public $custom;
+    /** @internal @var int */
+    public $start;
+    /** @internal @var int */
+    public $end;
+    /** @internal @var int right after the opening tag; 0 when the tag is not closed */
+    public $innerStart;
+    /** @internal @var int the last byte before the end tag; 0 when the tag is not closed */
+    public $innerEnd;
+    /** @internal @var int */
+    public $depth;
+
+    /** @internal Tags are made by the document: HtmlDocument::node(). */
+    public function __construct(HtmlDocument $doc, int $i)
+    {
+        $this->doc = $doc;
+        $this->index = $i;
+        $this->parentIndex = $doc->parents[$i];
+        $this->key = $doc->keys[$i];
+        $this->custom = $doc->customs[$i];
+        $this->start = $doc->starts[$i];
+        $this->end = $doc->ends[$i];
+        $this->innerStart = $doc->innerStarts[$i];
+        $this->innerEnd = $doc->innerEnds[$i];
+        $this->depth = $doc->depths[$i];
+    }
 
     // ----- reading a tag -----
 
@@ -125,8 +140,8 @@ final class HtmlNode implements \Stringable
     /** Whether another tag starts inside this one. */
     public function hasChildren(): bool
     {
-        $next = $this->doc->nodes[$this->index + 1] ?? null;
-        return $next !== null && $next->start < $this->end;
+        $i = $this->index + 1;
+        return $i < $this->doc->size && $this->doc->starts[$i] < $this->end;
     }
 
     /** The opening tag without '<' and '>': the name and the attributes. */
@@ -233,7 +248,7 @@ final class HtmlNode implements \Stringable
     /** The enclosing tag, or null. */
     public function parent(): ?HtmlNode
     {
-        return $this->parentIndex >= 0 ? $this->doc->nodes[$this->parentIndex] : null;
+        return $this->parentIndex >= 0 ? $this->doc->at($this->parentIndex) : null;
     }
 
     /**
@@ -244,12 +259,13 @@ final class HtmlNode implements \Stringable
     public function children(): array
     {
         $out = [];
-        $nodes = $this->doc->nodes;
-        $count = count($nodes);
+        $d = $this->doc;
+        $ends = $d->ends;
+        $depths = $d->depths;
         $depth = $this->depth + 1;
-        for ($i = $this->index + 1; $i < $count && $nodes[$i]->end <= $this->end; $i++) {
-            if ($nodes[$i]->depth === $depth) {
-                $out[] = $nodes[$i];
+        for ($i = $this->index + 1, $count = $d->size; $i < $count && $ends[$i] <= $this->end; $i++) {
+            if ($depths[$i] === $depth) {
+                $out[] = $d->at($i);
             }
         }
         return $out;
@@ -258,23 +274,23 @@ final class HtmlNode implements \Stringable
     /** The tag that follows in document order (the first child, if there is one), or null. */
     public function next(): ?HtmlNode
     {
-        return $this->doc->nodes[$this->index + 1] ?? null;
+        return $this->doc->node($this->index + 1);
     }
 
     /** The tag before this one in document order, or null. */
     public function previous(): ?HtmlNode
     {
-        return $this->index > 0 ? $this->doc->nodes[$this->index - 1] : null;
+        return $this->index > 0 ? $this->doc->at($this->index - 1) : null;
     }
 
     /** The first tag after the end of this one that matches the query (tags inside it are skipped), or null. */
     public function nextMatching(Query $q): ?HtmlNode
     {
-        $nodes = $this->doc->nodes;
-        $count = count($nodes);
-        for ($i = $this->index + 1; $i < $count; $i++) {
-            if ($nodes[$i]->start > $this->end && $q->matches($nodes[$i])) {
-                return $nodes[$i];
+        $d = $this->doc;
+        $starts = $d->starts;
+        for ($i = $this->index + 1, $count = $d->size; $i < $count; $i++) {
+            if ($starts[$i] > $this->end && $q->nameMatchesAt($d, $i) && $q->matches($d->at($i))) {
+                return $d->at($i);
             }
         }
         return null;
@@ -290,11 +306,11 @@ final class HtmlNode implements \Stringable
     public function nextSiblingMatching(Query $q): ?HtmlNode
     {
         // deeper tags are inside the following siblings; a shallower one ends the parent
-        $nodes = $this->doc->nodes;
-        $count = count($nodes);
-        for ($i = $this->index + 1; $i < $count && $nodes[$i]->depth >= $this->depth; $i++) {
-            if ($nodes[$i]->depth === $this->depth && $q->matches($nodes[$i])) {
-                return $nodes[$i];
+        $d = $this->doc;
+        $depths = $d->depths;
+        for ($i = $this->index + 1, $count = $d->size; $i < $count && $depths[$i] >= $this->depth; $i++) {
+            if ($depths[$i] === $this->depth && $q->nameMatchesAt($d, $i) && $q->matches($d->at($i))) {
+                return $d->at($i);
             }
         }
         return null;
@@ -310,10 +326,11 @@ final class HtmlNode implements \Stringable
     public function previousSiblingMatching(Query $q): ?HtmlNode
     {
         // deeper tags are inside the previous siblings; a shallower one is the parent
-        $nodes = $this->doc->nodes;
-        for ($i = $this->index - 1; $i >= 0 && $nodes[$i]->depth >= $this->depth; $i--) {
-            if ($nodes[$i]->depth === $this->depth && $q->matches($nodes[$i])) {
-                return $nodes[$i];
+        $d = $this->doc;
+        $depths = $d->depths;
+        for ($i = $this->index - 1; $i >= 0 && $depths[$i] >= $this->depth; $i--) {
+            if ($depths[$i] === $this->depth && $q->nameMatchesAt($d, $i) && $q->matches($d->at($i))) {
+                return $d->at($i);
             }
         }
         return null;
@@ -360,7 +377,7 @@ final class HtmlNode implements \Stringable
     /** The first tag inside this one (a descendant) that matches the query, or null. */
     public function find(Query $q): ?HtmlNode
     {
-        return HtmlDocument::findIn($this->doc->nodes, $this->index + 1, $this->end, $q);
+        return $q->findIn($this->doc, $this->index + 1, $this->end);
     }
 
     /**
@@ -370,7 +387,7 @@ final class HtmlNode implements \Stringable
      */
     public function findAll(Query $q): array
     {
-        return HtmlDocument::findAllIn($this->doc->nodes, $this->index + 1, $this->end, $q);
+        return $q->findAllIn($this->doc, $this->index + 1, $this->end);
     }
 
     /** Whether the tag matches the query. */

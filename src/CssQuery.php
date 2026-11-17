@@ -161,14 +161,39 @@ final class CssQuery implements \Stringable
     private function scan(HtmlDocument $d, ?HtmlNode $scope, int $from, int $end, bool $firstOnly): array
     {
         $out = [];
-        $nodes = $d->nodes;
-        $count = count($nodes);
+        $ends = $d->ends;
+        $keys = $d->keys;
         $list = $this->list;
-        for ($i = $from; $i < $count; $i++) {
-            $n = $nodes[$i];
-            if ($n->end > $end) {
+        // the name of the rightmost compound of each selector, checked on the arrays before a tag object is made
+        $names = [];
+        foreach ($list as $item) {
+            $last = $item['c'][count($item['c']) - 1];
+            if ($last['key'] < 0 && $last['name'] === '') {
+                $names = null; // any element
                 break;
             }
+            $names[] = $last;
+        }
+        for ($i = $from, $count = $d->size; $i < $count; $i++) {
+            if ($ends[$i] > $end) {
+                break;
+            }
+            if ($names !== null) {
+                $k = $keys[$i];
+                $candidate = false;
+                foreach ($names as $cp) {
+                    if ($cp['key'] >= 0 ? $k === $cp['key'] : $k < 0 && $d->customs[$i] === $cp['name']) {
+                        $candidate = true;
+                        break;
+                    }
+                }
+                if (!$candidate) {
+                    continue;
+                }
+            } elseif (!self::isElementAt($d, $i)) {
+                continue;
+            }
+            $n = $d->at($i);
             if (self::matchesList($list, $n, $scope, $scope)) {
                 $out[] = $n;
                 if ($firstOnly) {
@@ -186,16 +211,24 @@ final class CssQuery implements \Stringable
         if ($key >= 0) {
             return $key !== self::COMMENT && $key !== self::DOCTYPE && $key !== self::XML_DECLARATION;
         }
-        if ($n->custom === '') {
-            return false;
+        $custom = $n->custom;
+        return $custom !== '' && $custom[0] !== '!' && $custom[0] !== '?';
+    }
+
+    /** @internal isElement() for the tag at index $i */
+    public static function isElementAt(HtmlDocument $d, int $i): bool
+    {
+        $key = $d->keys[$i];
+        if ($key >= 0) {
+            return $key !== self::COMMENT && $key !== self::DOCTYPE && $key !== self::XML_DECLARATION;
         }
-        $c = $n->custom[0];
-        return $c !== '!' && $c !== '?';
+        $custom = $d->customs[$i];
+        return $custom !== '' && $custom[0] !== '!' && $custom[0] !== '?';
     }
 
     private static function tree(HtmlDocument $d): CssTree
     {
-        return $d->cssTree ??= new CssTree($d->nodes);
+        return $d->cssTree ??= new CssTree($d);
     }
 
     // ----- matching -----
@@ -300,27 +333,27 @@ final class CssQuery implements \Stringable
     /** :has(): whether a tag in the anchor's scope matches the relative selector. */
     private static function hasMatch(array $relative, HtmlNode $anchor, ?HtmlNode $scope): bool
     {
-        $nodes = $anchor->doc->nodes;
-        $count = count($nodes);
+        $d = $anchor->doc;
+        $ends = $d->ends;
+        $count = $d->size;
         foreach ($relative as $item) {
             $last = count($item['c']) - 1;
             $i = $anchor->index + 1;
             if ($item['lead'] === self::COMB_DESCENDANT || $item['lead'] === self::COMB_CHILD) {
                 // the tags inside the anchor
-                for (; $i < $count && $nodes[$i]->end <= $anchor->end; $i++) {
-                    if (self::isElement($nodes[$i]) && self::matchesComplex($item, $last, $nodes[$i], $scope, $anchor)) {
+                for (; $i < $count && $ends[$i] <= $anchor->end; $i++) {
+                    if (self::isElementAt($d, $i) && self::matchesComplex($item, $last, $d->at($i), $scope, $anchor)) {
                         return true;
                     }
                 }
             } else {
                 // the following siblings and the tags inside them, up to the end of the parent
-                while ($i < $count && $nodes[$i]->end <= $anchor->end) {
+                while ($i < $count && $ends[$i] <= $anchor->end) {
                     $i++;
                 }
-                $parent = $anchor->parent();
-                $end = $parent !== null ? $parent->end : PHP_INT_MAX;
-                for (; $i < $count && $nodes[$i]->end <= $end; $i++) {
-                    if (self::isElement($nodes[$i]) && self::matchesComplex($item, $last, $nodes[$i], $scope, $anchor)) {
+                $end = $anchor->parentIndex >= 0 ? $ends[$anchor->parentIndex] : PHP_INT_MAX;
+                for (; $i < $count && $ends[$i] <= $end; $i++) {
+                    if (self::isElementAt($d, $i) && self::matchesComplex($item, $last, $d->at($i), $scope, $anchor)) {
                         return true;
                     }
                 }
@@ -495,14 +528,13 @@ final class CssQuery implements \Stringable
             return true; // a void or unclosed tag has no content
         }
         $position = $n->innerStart;
-        $nodes = $n->doc->nodes;
-        $count = count($nodes);
-        for ($i = $n->index + 1; $i < $count && $nodes[$i]->end <= $n->end; $i++) {
-            $child = $nodes[$i];
-            if (self::isElement($child) || $child->start > $position) {
+        $d = $n->doc;
+        $ends = $d->ends;
+        for ($i = $n->index + 1, $count = $d->size; $i < $count && $ends[$i] <= $n->end; $i++) {
+            if (self::isElementAt($d, $i) || $d->starts[$i] > $position) {
                 return false; // an element, or text before a comment
             }
-            $position = max($position, $child->end + 1);
+            $position = max($position, $ends[$i] + 1);
         }
         return $position > $n->innerEnd;
     }

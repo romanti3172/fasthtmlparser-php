@@ -20,10 +20,10 @@ final class CssTree
     /** @var array{list<int>, list<int>}|null {position, fromEnd} among the siblings of the same type */
     private ?array $types = null;
 
-    /** @param list<HtmlNode> $nodes */
-    public function __construct(private readonly array $nodes)
+    public function __construct(private readonly HtmlDocument $doc)
     {
-        $count = count($nodes);
+        $count = $doc->size;
+        $parents = $doc->parents;
         $previous = $count > 0 ? array_fill(0, $count, -1) : [];
         $next = $previous;
         $position = $count > 0 ? array_fill(0, $count, 0) : [];
@@ -32,10 +32,10 @@ final class CssTree
         $lastChild = [];
         $children = [];
         for ($i = 0; $i < $count; $i++) {
-            if (!CssQuery::isElement($nodes[$i])) {
+            if (!CssQuery::isElementAt($doc, $i)) {
                 continue;
             }
-            $slot = $nodes[$i]->parentIndex + 1;
+            $slot = $parents[$i] + 1;
             $prev = $lastChild[$slot] ?? -1;
             $previous[$i] = $prev;
             if ($prev >= 0) {
@@ -46,7 +46,7 @@ final class CssTree
         }
         for ($i = 0; $i < $count; $i++) {
             if ($position[$i] > 0) {
-                $fromEnd[$i] = $children[$nodes[$i]->parentIndex + 1] - $position[$i] + 1;
+                $fromEnd[$i] = $children[$parents[$i] + 1] - $position[$i] + 1;
             }
         }
         $this->previous = $previous;
@@ -58,13 +58,13 @@ final class CssTree
     public function prev(HtmlNode $n): ?HtmlNode
     {
         $i = $this->previous[$n->index];
-        return $i < 0 ? null : $this->nodes[$i];
+        return $i < 0 ? null : $this->doc->at($i);
     }
 
     public function nextOf(HtmlNode $n): ?HtmlNode
     {
         $i = $this->next[$n->index];
-        return $i < 0 ? null : $this->nodes[$i];
+        return $i < 0 ? null : $this->doc->at($i);
     }
 
     /** @return array{list<int>, list<int>} */
@@ -73,7 +73,8 @@ final class CssTree
         if ($this->types !== null) {
             return $this->types;
         }
-        $count = count($this->nodes);
+        $d = $this->doc;
+        $count = $d->size;
         $pos = $count > 0 ? array_fill(0, $count, 0) : [];
         $end = $pos;
         $seen = [];
@@ -82,8 +83,8 @@ final class CssTree
             if ($this->position[$i] === 0) {
                 continue; // not an element
             }
-            $n = $this->nodes[$i];
-            $k = $n->parentIndex . '|' . $n->key . '|' . ($n->key < 0 ? $n->custom : '');
+            $key = $d->keys[$i];
+            $k = $d->parents[$i] . '|' . $key . '|' . ($key < 0 ? $d->customs[$i] : '');
             $keys[$i] = $k;
             $pos[$i] = $seen[$k] = ($seen[$k] ?? 0) + 1;
         }

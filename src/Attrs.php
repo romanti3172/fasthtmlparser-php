@@ -70,21 +70,48 @@ final class Attrs
         }
         $src = $n->doc->source;
         $start = $n->start;
-        $end = self::openTagEnd($n); // $src[$start, $end): "<name attributes", without the closing '>'
+        $end = $n->innerStart > 0 && $n->innerEnd > 0 ? $n->innerStart - 1 : $n->end;
+        // the opening tag: "<name attributes", without the closing '>'
+        $tag = substr($src, $start, $end - $start);
+        $length = strlen($tag);
 
         // The first place where the name stands as a word of its own. Most tags have none.
-        $pos = self::nextWord($src, $end, $attribute, $start + 1);
-        if ($pos < 0) {
+        $alen = strlen($attribute);
+        $p = stripos($tag, $attribute, 1);
+        while ($p !== false) {
+            $after = $p + $alen;
+            // starts a name: after whitespace, a quote, '/' or '='; ends a name: at whitespace, '=', '/' or '>'
+            if (strspn($tag, " \t\n\x0b\x0c\r\"'/=", $p - 1, 1) === 1
+                && ($after === $length || strspn($tag, " \t\n\x0b\x0c\r=/>", $after, 1) === 1)) {
+                break;
+            }
+            $p = $p + 1 < $length ? stripos($tag, $attribute, $p + 1) : false;
+        }
+        if ($p === false) {
             return '';
         }
 
         // That word is the attribute unless it is inside the value of another one (title="see id=5", x= id).
         // Nearly always that is ruled out at once, and the value is read in place.
-        $firstWord = $n->key >= 0 && $pos - $start === strlen(TagNames::NAMES[$n->key]) + 2;
-        if ($firstWord || self::isNameForSure($src, $start, $pos)) {
-            self::readValue($src, $pos + strlen($attribute), $end);
-            return self::$valueStart < 0 ? '' : substr($src, self::$valueStart, self::$valueLength);
+        if (($n->key >= 0 && $p === strlen(TagNames::NAMES[$n->key]) + 2) || self::isNameForSure($tag, $p)) {
+            $q = $p + $alen;
+            $q += strspn($tag, Chars::SPACE, $q);
+            if ($q >= $length || $tag[$q] !== '=') {
+                return ''; // no value
+            }
+            $q++;
+            $q += strspn($tag, Chars::SPACE, $q);
+            if ($q >= $length) {
+                return '';
+            }
+            $c = $tag[$q];
+            if ($c === '"' || $c === "'") {
+                $close = strpos($tag, $c, $q + 1);
+                return $close === false ? substr($tag, $q + 1) : substr($tag, $q + 1, $close - $q - 1);
+            }
+            return substr($tag, $q, strcspn($tag, Chars::SPACE, $q));
         }
+        $pos = $start + $p;
 
         // Otherwise the attributes are read one by one, up to the one that starts at that word.
         $s = new AttrScanner($n);
@@ -126,45 +153,27 @@ final class Attrs
     }
 
     /**
-     * Whether the word at $pos of the opening tag that starts at $start is an attribute name, judged by the chars
+     * Whether the word at $pos of the opening tag $tag ("<name attributes") is an attribute name, judged by the chars
      * before it alone. False means "not sure".
      */
-    private static function isNameForSure(string $src, int $start, int $pos): bool
+    private static function isNameForSure(string $tag, int $pos): bool
     {
         // After whitespace, and not as the unquoted value in "x= word".
-        $last = $pos - 1;
-        if (strspn($src, Chars::SPACE, $last, 1) !== 1) {
+        if (strspn($tag, Chars::SPACE, $pos - 1, 1) !== 1) {
             return false;
         }
-        while ($last > $start && strspn($src, Chars::SPACE, $last, 1) === 1) {
-            $last--;
-        }
-        if ($src[$last] === '=') {
+        $before = rtrim(substr($tag, 0, $pos), Chars::SPACE); // it starts with '<'
+        if ($before[-1] === '=') {
             return false;
         }
         // Not inside a quoted value: it is enough that the last quote of each kind before the word does not open a value.
-        return !self::opensValue($src, $start, self::lastIndexIn($src, '"', $start, $last))
-            && !self::opensValue($src, $start, self::lastIndexIn($src, "'", $start, $last));
-    }
-
-    /** The last position of $ch in $src[$start, $last]; -1 when there is none. Never looks before the tag. */
-    private static function lastIndexIn(string $src, string $ch, int $start, int $last): int
-    {
-        $i = strrpos(substr($src, $start, $last - $start + 1), $ch);
-        return $i === false ? -1 : $start + $i;
-    }
-
-    /** Whether the quote at $quote (or -1: none) stands right after an '='. */
-    private static function opensValue(string $src, int $start, int $quote): bool
-    {
-        if ($quote < 0) {
-            return false;
+        foreach (['"', "'"] as $quote) {
+            $i = strrpos($before, $quote);
+            if ($i !== false && rtrim(substr($before, 0, $i), Chars::SPACE)[-1] === '=') {
+                return false;
+            }
         }
-        $k = $quote - 1; // >= $start: the tag starts with '<'
-        while ($k > $start && strspn($src, Chars::SPACE, $k, 1) === 1) {
-            $k--;
-        }
-        return $src[$k] === '=';
+        return true;
     }
 
     /** Compares the decoded value; decodes only when the raw value has '&' or CR. */

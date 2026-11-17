@@ -49,10 +49,14 @@ final class Parser
         'header', 'hgroup', 'hr', 'listing', 'main', 'menu', 'nav', 'ol', 'p', 'pre', 'search', 'section', 'summary',
         'table', 'ul', 'li', 'dd', 'dt', 'plaintext', 'xmp'];
 
-    /** @var array<int, true> */
-    private static array $void;
-    /** @var array<int, true> */
-    private static array $closesP;
+    // per tag key: what the parser does with it
+    private const F_VOID = 1;
+    private const F_CLOSES_P = 2;
+    private const F_RULE = 4;
+    private const F_RAW_TEXT = 8;
+
+    /** @var array<int, int> F_* by tag key */
+    private static array $flags;
     /** @var array{t: array<int, true>, s: array<int, true>, k: list<int>} */
     private static array $pRule;
     /** @var array<int, array{t: array<int, true>, s: array<int, true>, k: list<int>}> */
@@ -72,8 +76,16 @@ final class Parser
             }
             return ['t' => $set($targets), 's' => $s, 'k' => $keys($targets)];
         };
-        self::$void = $set(self::VOID_NAMES);
-        self::$closesP = $set(self::CLOSES_P_NAMES);
+        $flags = array_fill(0, count(TagNames::NAMES), 0);
+        foreach ($keys(self::VOID_NAMES) as $k) {
+            $flags[$k] |= self::F_VOID;
+        }
+        foreach ($keys(self::CLOSES_P_NAMES) as $k) {
+            $flags[$k] |= self::F_CLOSES_P;
+        }
+        foreach (self::RAW_TEXT_ENDS as $k => $_) {
+            $flags[$k] |= self::F_RAW_TEXT;
+        }
         self::$pRule = $rule(['p'], self::SCOPE_STOPS);
 
         $r = [];
@@ -88,6 +100,10 @@ final class Parser
         $r[TagNames::KEYS['option']] = $rule(['option'], $selectStops, ['optgroup']);
         $r[TagNames::KEYS['optgroup']] = $rule(['option', 'optgroup'], $selectStops);
         self::$rules = $r;
+        foreach ($r as $k => $_) {
+            $flags[$k] |= self::F_RULE;
+        }
+        self::$flags = $flags;
         $targets = [];
         foreach ($r as $x) {
             foreach ($x['k'] as $k) {
@@ -204,19 +220,20 @@ final class Parser
     }
 
     /**
-     * Parses $src into the flat tag list of $doc.
+     * Parses $src into the flat tag list: the tags in document order as parallel arrays
+     * [keys, custom names, parents, depths, starts, ends, inner starts, inner ends].
      *
-     * @return list<HtmlNode>
+     * @return array{list<int>, list<string>, list<int>, list<int>, list<int>, list<int>, list<int>, list<int>}
      */
-    public static function parseTags(HtmlDocument $doc, string $src): array
+    public static function parseTags(string $src): array
     {
         if (!str_contains($src, '<')) {
-            return [];
+            return [[], [], [], [], [], [], [], []];
         }
         if (!self::$ready) {
             self::init();
         }
-        $st = new self($doc, $src);
+        $st = new self($src);
         $st->scan(false, 0, strlen($src));
 
         // The end of the document ends every tag still open (a truncated page keeps its text),
@@ -230,27 +247,42 @@ final class Parser
         }
         $st->truncateOpenList(0, $regionEnd - 1);
 
-        $nodes = $st->count === count($st->nodes) ? $st->nodes : array_slice($st->nodes, 0, $st->count);
-        foreach ($nodes as $n) {
-            if ($n->innerEnd === 0) {
-                $n->innerStart = 0; // not closed: no body
+        $out = [$st->key, $st->customs, $st->parents, $st->depth, $st->starts, $st->ends, $st->innerStarts, $st->innerEnds];
+        if ($st->count < count($st->key)) {
+            foreach ($out as $k => $a) {
+                $out[$k] = array_slice($a, 0, $st->count);
             }
         }
-        return $nodes;
+        foreach ($out[7] as $k => $innerEnd) {
+            if ($innerEnd === 0) {
+                $out[6][$k] = 0; // not closed: no body
+            }
+        }
+        return $out;
     }
 
     // ----- the state of one parse -----
 
     private readonly bool $isXml;
-    /** @var list<HtmlNode> */
-    private array $nodes = [];
     /** @var list<int> Tag key, or -1 for a custom name */
     private array $key = [];
+    /** @var list<string> the lower-case name of a tag that is not in Tag, "" for the others */
+    private array $customs = [];
+    /** @var list<int> the index of the enclosing tag, -1 at the top level */
+    private array $parents = [];
+    /** @var list<int> the opening '<' */
+    private array $starts = [];
+    /** @var list<int> the last '>': of the end tag, or of the opening tag */
+    private array $ends = [];
+    /** @var list<int> right after the opening tag */
+    private array $innerStarts = [];
+    /** @var list<int> the last byte before the end tag; 0 when the tag is not closed */
+    private array $innerEnds = [];
     /** @var list<int> */
     private array $depth = [];
     /** @var list<int> the open tags as a linked list in document order */
     private array $prevOpen = [];
-    /** @var list<bool> <x/>: stays in the open list (a later </x> ends it), but nests nothing */
+    /** @var array<int, true> <x/>: stays in the open list (a later </x> ends it), but nests nothing */
     private array $selfClosed = [];
     /** @var list<int> indexes of the open tags that contain the following ones */
     private array $stack = [];
@@ -259,7 +291,7 @@ final class Parser
     /** @var array<int, int> per Tag, how many are in the open list */
     private array $openInList = [];
     /** @var array<string, int> custom names (lower case): how many such tags are in the open list */
-    private array $custom = [];
+    private array $customOpen = [];
     private int $count = 0;
     private int $stackTop = 0;
     private int $lastOpen = -1;
@@ -268,10 +300,11 @@ final class Parser
     private bool $tagStarted = false; // scan results
     private int $tagStart = 0;
 
-    private function __construct(private readonly HtmlDocument $doc, private readonly string $src)
+    private function __construct(private readonly string $src)
     {
         $this->isXml = self::detectXml($src);
         $this->budget = self::REPAIR_BUDGET_FACTOR * strlen($src);
+        $this->openInList = array_fill(0, count(TagNames::NAMES), 0);
     }
 
     /** Parses $src[$from, $to) ($from is outside a tag), adding tags at count. Tags still open at $to stay on the stack. */
@@ -304,11 +337,15 @@ final class Parser
                         $depth = $this->depth[$parent] + 1;
                     }
                     $k = $this->count;
-                    $this->nodes[$k] = new HtmlNode($this->doc, $k, $parent, self::COMMENT, '', $i, $commentEnd, $commentEnd + 1, $depth);
                     $this->key[$k] = self::COMMENT;
+                    $this->customs[$k] = '';
+                    $this->parents[$k] = $parent;
+                    $this->starts[$k] = $i;
+                    $this->ends[$k] = $commentEnd;
+                    $this->innerStarts[$k] = $commentEnd + 1;
+                    $this->innerEnds[$k] = 0;
                     $this->depth[$k] = $depth;
                     $this->prevOpen[$k] = -1;
-                    $this->selfClosed[$k] = false;
                     $this->count++;
                     $i = $commentEnd + 1;
                     continue;
@@ -371,18 +408,40 @@ final class Parser
         $src = $this->src;
         $from = $tagStart + 1;
         $to = $gt;
-        while (($n = Chars::spaceBefore($src, $to, $from)) > 0) {
-            $to -= $n;
+        if ($from < $to && ($src[$to - 1] <= ' ' || $src[$to - 1] >= "\x80")) {
+            while (($n = Chars::spaceBefore($src, $to, $from)) > 0) {
+                $to -= $n;
+            }
         }
-        while (($n = Chars::spaceAt($src, $from, $to)) > 0) {
-            $from += $n;
+        if ($from < $to && ($src[$from] <= ' ' || $src[$from] >= "\x80")) {
+            while (($n = Chars::spaceAt($src, $from, $to)) > 0) {
+                $from += $n;
+            }
         }
         if ($from === $to) {
             return;
         }
         // Resolve the name once, then compare ints instead of a lookup per candidate.
-        $key = self::lookupTagAt($src, $from, $to);
-        $name = $key >= 0 ? '' : substr($src, $from, $to - $from); // only custom names are compared as strings
+        $name = substr($src, $from, $to - $from);
+        $key = $to - $from <= 32 ? TagNames::KEYS[$name] ?? TagNames::KEYS[strtolower($name)] ?? -1 : -1;
+
+        // Well-formed markup: the end tag closes the innermost open tag, which is on top of the stack. What matchEnd()
+        // and truncateOpenList() do for it, without the loops.
+        $j = $this->lastOpen;
+        if ($key >= 0 && $j >= 0 && $this->key[$j] === $key && $this->stackTop > 0 && $this->stack[$this->stackTop - 1] === $j) {
+            $this->innerEnds[$j] = $tagStart - 2;
+            $this->ends[$j] = $gt;
+            $this->stackTop--;
+            if ($key === self::P) {
+                $this->openP--;
+            }
+            if ($rules) {
+                $this->openByKey[$key]--;
+            }
+            $this->openInList[$key]--;
+            $this->lastOpen = $this->prevOpen[$j];
+            return;
+        }
         // The rules may have ended the matched tag itself (<li><div><li>x</div>: the second <li> ends the first one
         // together with its <div>, as in a browser): the end tag is matched again, to what is open now.
         // Once: the part is not scanned a second time.
@@ -400,15 +459,15 @@ final class Parser
         // A name that no open tag has is a stray end tag: it is skipped without scanning the open tags.
         $closing = '';
         if ($key >= 0) {
-            if (($this->openInList[$key] ?? 0) <= 0) {
+            if ($this->openInList[$key] <= 0) {
                 return false;
             }
         } else {
-            if ($this->custom === []) {
+            if ($this->customOpen === []) {
                 return false;
             }
             $closing = Chars::lower($name);
-            if (($this->custom[$closing] ?? 0) <= 0) {
+            if (($this->customOpen[$closing] ?? 0) <= 0) {
                 return false;
             }
         }
@@ -418,7 +477,7 @@ final class Parser
                 if ($this->key[$j] !== $key) {
                     continue;
                 }
-            } elseif ($this->key[$j] >= 0 || $this->nodes[$j]->custom !== $closing) {
+            } elseif ($this->key[$j] >= 0 || $this->customs[$j] !== $closing) {
                 continue;
             }
 
@@ -438,9 +497,8 @@ final class Parser
                 }
             }
 
-            $node = $this->nodes[$j];
-            $node->innerEnd = $innerEnd;
-            $node->end = $gt;
+            $this->innerEnds[$j] = $innerEnd;
+            $this->ends[$j] = $gt;
 
             while ($this->stackTop > 0 && $this->stack[$this->stackTop - 1] >= $j) {
                 $this->stackTop--;
@@ -465,33 +523,37 @@ final class Parser
     private function startTag(bool $rules, int $tagStart, int $gt, int $to): int
     {
         $src = $this->src;
-        // The name in the inside of the opening tag (trimmed; "!--" for a comment).
-        $from = $tagStart;
+        // The name in the inside of the opening tag (trimmed; "!--" for a comment). It starts at $tagStart: the first
+        // char is a letter, '!' or '?'.
         $end = $gt;
-        while (($n = Chars::spaceBefore($src, $end, $from)) > 0) {
-            $end -= $n;
+        if ($src[$gt - 1] >= "\x80") {
+            while (($n = Chars::spaceBefore($src, $end, $tagStart)) > 0) {
+                $end -= $n;
+            }
         }
-        while (($n = Chars::spaceAt($src, $from, $end)) > 0) {
-            $from += $n;
-        }
-        if ($from + 3 <= $end && $src[$from] === '!' && $src[$from + 1] === '-' && $src[$from + 2] === '-') {
-            $nameTo = $from + 3;
+        if ($src[$tagStart] === '!' && $tagStart + 3 <= $end && $src[$tagStart + 1] === '-' && $src[$tagStart + 2] === '-') {
+            $length = 3;
         } else {
             // The name ends at whitespace or '/': <br/> is "br", as <br /> is.
-            $nameTo = $from + strcspn($src, " \t\n\x0b\x0c\r/", $from, $end - $from);
+            $length = strcspn($src, " \t\n\x0b\x0c\r/", $tagStart, $end - $tagStart);
         }
-        $key = self::lookupTagAt($src, $from, $nameTo);
-        // Custom names (svg elements, web components, ...): the lower-case name.
+        $key = -1;
         $customName = '';
-        if ($key < 0 && $nameTo > $from) {
-            $customName = Chars::lower(substr($src, $from, $nameTo - $from));
-            $this->custom[$customName] ??= 0;
+        if ($length > 0) {
+            $name = substr($src, $tagStart, $length);
+            $key = $length <= 32 ? TagNames::KEYS[$name] ?? TagNames::KEYS[strtolower($name)] ?? -1 : -1;
+            if ($key < 0) {
+                // Custom names (svg elements, web components, ...): the lower-case name.
+                $customName = Chars::lower($name);
+                $this->customOpen[$customName] ??= 0;
+            }
         }
+        $flags = $key >= 0 && !$this->isXml ? self::$flags[$key] : 0;
 
-        if (!$this->isXml && $key >= 0) {
+        if ($flags !== 0) {
             // Optional end tags (HTML5): <li> ends an open <li>, <td> an open <td>, ...
-            $rule = self::$rules[$key] ?? null;
-            if ($rule !== null) {
+            if ($flags & self::F_RULE) {
+                $rule = self::$rules[$key];
                 if ($rules) {
                     foreach ($rule['k'] as $t) {
                         if (($this->openByKey[$t] ?? 0) > 0) {
@@ -510,7 +572,7 @@ final class Parser
             }
 
             // A block element ends an open <p>. Usually no <p> is open and this is one compare.
-            if ($this->openP > 0 && isset(self::$closesP[$key])) {
+            if ($this->openP > 0 && ($flags & self::F_CLOSES_P)) {
                 if ($rules) {
                     $this->closeInScope(self::$pRule, $tagStart - 2, true);
                 } else {
@@ -528,32 +590,40 @@ final class Parser
         }
 
         $index = $this->count;
-        $this->nodes[$index] = new HtmlNode($this->doc, $index, $parent, $key, $customName, $tagStart - 1, $gt, $gt + 1, $depth);
+        $this->customs[$index] = $customName;
+        $this->parents[$index] = $parent;
+        $this->starts[$index] = $tagStart - 1;
+        $this->ends[$index] = $gt;
+        $this->innerStarts[$index] = $gt + 1;
+        $this->innerEnds[$index] = 0;
 
         // Void elements (<br>, <img>, <meta>, ...) and declarations never contain anything.
-        $isVoid = !$this->isXml && $key >= 0 && isset(self::$void[$key]);
+        $isVoid = ($flags & self::F_VOID) !== 0;
         $selfClosing = $isVoid;
         if (!$selfClosing) {
-            $e = $gt;
-            while ($e > $tagStart && strspn($src[$e - 1], Chars::SPACE) === 1) {
-                $e--;
+            $c = $src[$gt - 1];
+            if ($c === '/') {
+                $selfClosing = true;
+            } elseif ($c <= ' ') {
+                $inside = rtrim(substr($src, $tagStart, $gt - $tagStart), Chars::SPACE);
+                $selfClosing = $inside !== '' && $inside[-1] === '/';
             }
-            $selfClosing = $e > $tagStart && $src[$e - 1] === '/';
         }
 
         $this->key[$index] = $key;
         $this->depth[$index] = $depth;
         if ($isVoid) {
             $this->prevOpen[$index] = -1;
-            $this->selfClosed[$index] = false;
         } else {
             $this->prevOpen[$index] = $this->lastOpen;
-            $this->selfClosed[$index] = $selfClosing;
+            if ($selfClosing) {
+                $this->selfClosed[$index] = true;
+            }
             $this->lastOpen = $index;
             if ($key >= 0) {
-                $this->openInList[$key] = ($this->openInList[$key] ?? 0) + 1;
+                $this->openInList[$key]++;
             } elseif ($customName !== '') {
-                $this->custom[$customName]++;
+                $this->customOpen[$customName]++;
             }
         }
         $this->count++;
@@ -572,7 +642,7 @@ final class Parser
 
             // <script>, <style>, <textarea>, <title>, ...: the content is text, not markup;
             // continue right before the matching end tag.
-            if (!$this->isXml && $key >= 0 && isset(self::RAW_TEXT_ENDS[$key])) {
+            if ($flags & self::F_RAW_TEXT) {
                 return self::findRawTextEnd($src, $gt + 1, self::RAW_TEXT_ENDS[$key], $to) - 1;
             }
         }
@@ -606,7 +676,7 @@ final class Parser
     private function repair(int $stackPos, int $regionEnd): void
     {
         $first = $this->stack[$stackPos];
-        $from = $this->nodes[$first]->start;
+        $from = $this->starts[$first];
 
         // Past the budget the part is left as it is, so that parsing stays linear on any markup.
         $cost = $regionEnd - $from;
@@ -643,17 +713,19 @@ final class Parser
     {
         $k = $this->lastOpen;
         while ($k >= $first) {
-            $node = $this->nodes[$k];
             $key = $this->key[$k];
             if ($key >= 0) {
                 $this->openInList[$key]--;
-            } elseif ($node->custom !== '' && isset($this->custom[$node->custom])) {
-                $this->custom[$node->custom]--;
+            } else {
+                $custom = $this->customs[$k];
+                if ($custom !== '' && isset($this->customOpen[$custom])) {
+                    $this->customOpen[$custom]--;
+                }
             }
 
-            if ($end >= 0 && !$this->selfClosed[$k] && $node->innerEnd === 0) {
-                $node->innerEnd = $end;
-                $node->end = $end;
+            if ($end >= 0 && !isset($this->selfClosed[$k]) && $this->innerEnds[$k] === 0) {
+                $this->innerEnds[$k] = $end;
+                $this->ends[$k] = $end;
             }
             $k = $this->prevOpen[$k];
         }
