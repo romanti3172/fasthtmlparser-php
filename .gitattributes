@@ -1,0 +1,6 @@
+# Sources with LF everywhere.
+* text=auto eol=lf
+
+# Test pages and the expected .NET output are compared exactly (positions, CR LF and lone CR pages):
+# git must never convert their line endings.
+testdata/** -text linguist-vendored
