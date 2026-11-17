@@ -126,6 +126,11 @@ final class ApiTest extends TestCase
         $this->assertSame(['href', 'title', 'data-x', 'id', 'CLASS', 'hidden'], array_column($a->attrs(), 0));
         $this->assertTrue($a->isCss('[hidden]') && $a->isCss('a#main.One'));
         $this->assertSame('a href=/p?a=1&copy=2 title="see id=5" data-x=\'<b>\' id=main CLASS="One two" hidden', $a->source());
+
+        // a quote that is not closed in the tag: the value runs to the end of the tag
+        $b = HtmlDocument::parse('<b id=x title="one>two</b>')->node(0);
+        $this->assertSame('one', $b->attr('title'));
+        $this->assertSame('x', $b->attr('id'));
     }
 
     public function testLinks(): void
@@ -154,6 +159,8 @@ final class ApiTest extends TestCase
         $this->assertSame('', $doc->xpathValue('//missing'));
         $this->assertNull($doc->xpathFirst('//missing'));
         $this->assertSame('true', $doc->xpathValue('boolean(//dl)'));
+        // an attribute read as a string is decoded
+        $this->assertSame('1', HtmlDocument::parse('<a title="x &amp; y">a</a>')->xpathValue("count(//a[contains(@title, 'x & y')])"));
         $this->expectException(XPathException::class);
         $doc->xpath('count(//a)'); // a number is not tags
     }
