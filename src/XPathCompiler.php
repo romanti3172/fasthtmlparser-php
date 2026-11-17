@@ -594,7 +594,12 @@ final class XPathCompiler
             }
             $steps = $this->parseRelativeSteps($steps, false);
         }
-        return self::expr(X::E_PATH, X::TYPE_NODE_SET, false, ['start' => null, 'absolute' => $absolute, 'steps' => self::optimize($steps)]);
+        $path = self::expr(X::E_PATH, X::TYPE_NODE_SET, false, ['start' => null, 'absolute' => $absolute, 'steps' => self::optimize($steps)]);
+        $name = self::attributeName($path);
+        if ($name !== null) {
+            $path['attr'] = $name; // read in place where a string is needed
+        }
+        return $path;
     }
 
     /** Steps separated by '/' or '//'; $afterSlash: the next token is a '/' or '//' to read first. */

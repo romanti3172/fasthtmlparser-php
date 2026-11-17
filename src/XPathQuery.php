@@ -379,12 +379,17 @@ final class XPathQuery implements \Stringable
         $count = $d->size;
         if ($test['k'] === self::TK_NAME) {
             $q = $test['q'];
+            $qk = $q->key;
+            $keys = $d->keys;
             for ($i = $first; $i < $count; $i++) {
                 if ($ends[$i] > $end) {
                     break;
                 }
-                if ($q->nameMatchesAt($d, $i)) {
-                    $out[] = XNode::ofTag($d->at($i));
+                // a known name: one int compare on the arrays
+                $k = $keys[$i];
+                if ($qk >= 0 ? $k === $qk || ($k < 0 && $q->tagName !== '' && Chars::equalFold($d->customs[$i], $q->tagName))
+                    : $q->nameMatchesAt($d, $i)) {
+                    $out[] = new XNode(XNode::ELEMENT, $d, $d->made[$i] ??= new HtmlNode($d, $i));
                 }
             }
             return;
@@ -446,13 +451,11 @@ final class XPathQuery implements \Stringable
         if ($x->kind !== XNode::ELEMENT) {
             return null;
         }
-        $s = new AttrScanner($x->tag);
-        while ($s->next()) {
-            if (Chars::equalFold($s->name(), $name)) {
-                return $s->rawValue();
-            }
+        $raw = Attrs::attrRaw($x->tag, $name);
+        if ($raw !== '') {
+            return $raw;
         }
-        return null;
+        return Attrs::hasAttribute($x->tag, $name) ? '' : null;
     }
 
     /** The root and elements give their visible text; text nodes and attributes their decoded value; comments their content. */
@@ -651,6 +654,11 @@ final class XPathQuery implements \Stringable
 
     private static function evalString(array $e, XNode $node, int $position, int $size): string
     {
+        if (isset($e['attr'])) {
+            // a bare @name: the string-value of the first such attribute, read in place
+            $raw = $node->kind === XNode::ELEMENT ? Attrs::attrRaw($node->tag, $e['attr']) : '';
+            return strpbrk($raw, "&\r") === false ? $raw : Decode::decode($raw, true);
+        }
         return self::toStr(self::evalExpr($e, $node, $position, $size));
     }
 
@@ -1159,8 +1167,6 @@ final class XPathQuery implements \Stringable
     private static function evalFunction(array $e, XNode $node, int $position, int $size): mixed
     {
         $args = $e['args'];
-        $arg = static fn (int $i): string => self::evalString($args[$i], $node, $position, $size);
-        $contextOrArg = static fn (): string => $args === [] ? self::stringValue($node) : $arg(0);
         switch ($e['fn']) {
             case 'last':
                 return (float) $size;
@@ -1185,7 +1191,7 @@ final class XPathQuery implements \Stringable
                 }
                 return $name;
             case 'string':
-                return $contextOrArg();
+                return ($args === [] ? self::stringValue($node) : self::evalString($args[0], $node, $position, $size));
             case 'concat':
                 $s = '';
                 foreach ($args as $a) {
@@ -1193,30 +1199,30 @@ final class XPathQuery implements \Stringable
                 }
                 return $s;
             case 'starts-with':
-                return str_starts_with($arg(0), $arg(1));
+                return str_starts_with(self::evalString($args[0], $node, $position, $size), self::evalString($args[1], $node, $position, $size));
             case 'ends-with':
-                return str_ends_with($arg(0), $arg(1));
+                return str_ends_with(self::evalString($args[0], $node, $position, $size), self::evalString($args[1], $node, $position, $size));
             case 'contains':
-                return str_contains($arg(0), $arg(1));
+                return str_contains(self::evalString($args[0], $node, $position, $size), self::evalString($args[1], $node, $position, $size));
             case 'substring-before':
-                $s = $arg(0);
-                $i = strpos($s, $arg(1));
+                $s = self::evalString($args[0], $node, $position, $size);
+                $i = strpos($s, self::evalString($args[1], $node, $position, $size));
                 return $i === false ? '' : substr($s, 0, $i);
             case 'substring-after':
-                $s = $arg(0);
-                $t = $arg(1);
+                $s = self::evalString($args[0], $node, $position, $size);
+                $t = self::evalString($args[1], $node, $position, $size);
                 $i = strpos($s, $t);
                 return $i === false ? '' : substr($s, $i + strlen($t));
             case 'substring':
                 return self::substring($e, $node, $position, $size);
             case 'string-length':
-                return (float) Chars::utf16Length($contextOrArg()); // UTF-16 units, as .NET counts
+                return (float) Chars::utf16Length(($args === [] ? self::stringValue($node) : self::evalString($args[0], $node, $position, $size))); // UTF-16 units, as .NET counts
             case 'normalize-space':
-                return self::normalizeSpace($contextOrArg());
+                return self::normalizeSpace(($args === [] ? self::stringValue($node) : self::evalString($args[0], $node, $position, $size)));
             case 'translate':
-                $s = $arg(0);
-                $from = Chars::chars($arg(1));
-                $to = Chars::chars($arg(2));
+                $s = self::evalString($args[0], $node, $position, $size);
+                $from = Chars::chars(self::evalString($args[1], $node, $position, $size));
+                $to = Chars::chars(self::evalString($args[2], $node, $position, $size));
                 $map = [];
                 foreach ($from as $k => $ch) {
                     $map[$ch] ??= $to[$k] ?? '';
@@ -1230,9 +1236,9 @@ final class XPathQuery implements \Stringable
                 }
                 return $out;
             case 'lower-case':
-                return Chars::lower($arg(0));
+                return Chars::lower(self::evalString($args[0], $node, $position, $size));
             case 'upper-case':
-                return Chars::upper($arg(0));
+                return Chars::upper(self::evalString($args[0], $node, $position, $size));
             case 'not':
                 return !self::evalBool($args[0], $node, $position, $size);
             case 'true':

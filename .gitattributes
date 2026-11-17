@@ -4,3 +4,14 @@
 # Test pages and the expected .NET output are compared exactly (positions, CR LF and lone CR pages):
 # git must never convert their line endings.
 testdata/** -text linguist-vendored
+
+# Not in the Composer package (the dist archive GitHub builds from a tag).
+/.github export-ignore
+/bench export-ignore
+/testdata export-ignore
+/tests export-ignore
+/tools export-ignore
+/.gitattributes export-ignore
+/.gitignore export-ignore
+/bench-results.md export-ignore
+/phpunit.xml export-ignore

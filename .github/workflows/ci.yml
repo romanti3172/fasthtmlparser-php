@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  # the tests (the .NET conformance data included) on the oldest supported PHP and the current versions
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        php: ['8.1', '8.2', '8.3', '8.4', '8.5']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php }}
+          extensions: mbstring
+          ini-values: opcache.enable_cli=1, opcache.jit=tracing, opcache.jit_buffer_size=64M
+          coverage: none
+      - run: composer validate --strict
+      - run: composer install --no-interaction --no-progress
+      - run: vendor/bin/phpunit
+
+  # the tables and shortcuts generated from the C# sources are up to date
+  generated:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: romanti3172/z3l.FastHtmlParser
+          path: z3l.FastHtmlParser
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          coverage: none
+      - run: php tools/gen.php z3l.FastHtmlParser/src/z3l.FastHtmlParser
+      - run: git diff --exit-code -- src
+
+  # the benchmark runs and every scraper gives the same records (short timings, not published)
+  bench:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: mbstring, dom
+          coverage: none
+      - run: composer install --no-interaction --no-progress
+        working-directory: bench
+      - run: php bench.php 0.05
+        working-directory: bench

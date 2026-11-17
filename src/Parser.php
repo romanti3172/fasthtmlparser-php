@@ -763,14 +763,20 @@ final class Parser
         $m = $this->firstMisnested($from, $this->stackTop);
         if ($m >= 0) {
             $this->repair($m, $tagStart - 1);
+            $from = $this->scopeStart($rule); // the part scanned again changed the stack
         }
-        $this->closeInScope($rule, $tagStart - 2, false);
+        $this->closeFrom($from, $tagStart - 2, false);
     }
 
     /** Ends the outermost target found below the first stop tag together with everything opened inside it. */
     private function closeInScope(array $rule, int $end, bool $byKey): void
     {
-        $from = $this->scopeStart($rule);
+        $this->closeFrom($this->scopeStart($rule), $end, $byKey);
+    }
+
+    /** Ends the tag at stack position $from (-1: none) together with everything opened inside it. */
+    private function closeFrom(int $from, int $end, bool $byKey): void
+    {
         if ($from < 0) {
             return;
         }

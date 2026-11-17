@@ -28,9 +28,12 @@ final class Query
     private ?string $source = null;
     private bool $plain = true;
 
-    /** @param int $key Tag key, or -1: by name ($tagName) or any ($tagName "") */
-    private function __construct(private readonly int $key, private readonly string $tagName)
-    {
+    private function __construct(
+        /** @internal Tag key, or -1: by name ($tagName) or any ($tagName "") */
+        public readonly int $key,
+        /** @internal the name as given; "" for a Tag and for any */
+        public readonly string $tagName,
+    ) {
     }
 
     /** Selects tags by name, case-insensitively; a string works for names that are not in Tag. */
