@@ -4,7 +4,7 @@
     "type": "library",
     "keywords": ["html", "parser", "xpath", "css", "selector", "scraping", "dom"],
     "homepage": "https://github.com/romanti3172/fasthtmlparser-php",
-    "license": "proprietary",
+    "license": "LicenseRef-z3l-FastHtmlParser",
     "authors": [
         {
             "name": "z3l",
