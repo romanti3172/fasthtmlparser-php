@@ -736,6 +736,35 @@ final class XPathCompiler
         foreach ($args as $a) {
             $pos = $pos || $a['pos'];
         }
-        return self::expr(X::E_FUNCTION, $info[2], $pos, ['fn' => $fn, 'args' => $args]);
+        return self::attributeTest($fn, $args) ?? self::expr(X::E_FUNCTION, $info[2], $pos, ['fn' => $fn, 'args' => $args]);
+    }
+
+    /**
+     * contains(@a, 'x'), starts-with(...), ends-with(...), also with the attribute wrapped in literals
+     * (contains(concat(' ', @class, ' '), ' x '), the usual class test), are evaluated on the attribute in place,
+     * without a node-set for every element. Null: a plain function call.
+     */
+    private static function attributeTest(string $fn, array $args): ?array
+    {
+        if (($fn !== 'contains' && $fn !== 'starts-with' && $fn !== 'ends-with') || $args[1]['op'] !== X::E_LITERAL) {
+            return null;
+        }
+        $arg = $args[0];
+        $name = self::attributeName($arg);
+        $prefix = $suffix = '';
+        if ($name === null) {
+            if ($arg['op'] !== X::E_FUNCTION || $arg['fn'] !== 'concat' || count($arg['args']) !== 3
+                || $arg['args'][0]['op'] !== X::E_LITERAL || $arg['args'][2]['op'] !== X::E_LITERAL) {
+                return null;
+            }
+            $name = self::attributeName($arg['args'][1]);
+            if ($name === null) {
+                return null;
+            }
+            $prefix = $arg['args'][0]['value'];
+            $suffix = $arg['args'][2]['value'];
+        }
+        return self::expr(X::E_ATTR_TEST, X::TYPE_BOOLEAN, false,
+            ['fn' => $fn, 'prefix' => $prefix, 'name' => $name, 'suffix' => $suffix, 'value' => $args[1]['value']]);
     }
 }
