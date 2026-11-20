@@ -38,6 +38,9 @@ final class XPathQuery implements \Stringable
     public const E_PATH = 10; // start (expr or null), absolute, steps
     public const E_FILTER = 11; // primary, preds
     public const E_FUNCTION = 12; // fn, args
+    // fn, prefix, name, suffix, value (needle): contains/starts-with/ends-with(concat(prefix, @name, suffix), value),
+    // tested on the attribute in place (prefix and suffix may be empty)
+    public const E_ATTR_TEST = 13;
 
     public const OP_EQ = 0;
     public const OP_NEQ = 1;
@@ -684,6 +687,18 @@ final class XPathQuery implements \Stringable
                 return $raw !== null && Attrs::attrEquals($raw, $e['value']) !== $e['negate'];
             case self::E_ATTR_EXISTS:
                 return self::attributeOf($node, $e['name']) !== null;
+            case self::E_ATTR_TEST:
+                // a missing attribute is an empty node-set, whose string-value is ""
+                $raw = self::attributeOf($node, $e['name']) ?? '';
+                if (Decode::needsDecoding($raw)) {
+                    $raw = Decode::decode($raw, true);
+                }
+                $value = $e['prefix'] . $raw . $e['suffix'];
+                return match ($e['fn']) {
+                    'contains' => str_contains($value, $e['value']),
+                    'starts-with' => str_starts_with($value, $e['value']),
+                    default => str_ends_with($value, $e['value']),
+                };
             default:
                 return self::toBoolean(self::evalExpr($e, $node, $position, $size));
         }
@@ -713,6 +728,7 @@ final class XPathQuery implements \Stringable
             case self::E_COMPARE:
             case self::E_ATTR_EQUALS:
             case self::E_ATTR_EXISTS:
+            case self::E_ATTR_TEST:
                 return self::evalBool($e, $node, $position, $size);
             case self::E_ARITH:
                 $x = self::evalNumber($e['l'], $node, $position, $size);
