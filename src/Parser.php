@@ -597,8 +597,11 @@ final class Parser
         $this->innerStarts[$index] = $gt + 1;
         $this->innerEnds[$index] = 0;
 
-        // Void elements (<br>, <img>, <meta>, ...) and declarations never contain anything.
-        $isVoid = ($flags & self::F_VOID) !== 0;
+        /* Void elements (<br>, <img>, <meta>, ...) never contain anything. Neither does markup named "!..." or "?..."
+           (<!doctype>, the XML declaration, processing instructions, <![if IE]>), in HTML and in XML alike: a bogus
+           comment in a browser, a declaration or processing instruction in XML. The name starts with a letter, '!' or
+           '?' (63), and '!' and '?' sort before the letters: one compare. */
+        $isVoid = ord($src[$tagStart]) <= 63 || ($flags & self::F_VOID) !== 0;
         $selfClosing = $isVoid;
         if (!$selfClosing) {
             $c = $src[$gt - 1];
